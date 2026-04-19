@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitive Helpers
+    function isValidId(id) { 
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); 
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isSignedIn() { return request.auth != null; }
+    function isAdmin() { 
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); 
+    }
+
+    // Validation Blueprint for User
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'createdAt', 'updatedAt']) 
+        && data.email is string && data.email.size() <= 256
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && (data.get('minecraftUsername', '') is string)
+        && (data.get('rank', 'default') is string);
+    }
+    
+    // Validation for User updates
+    function isValidUserUpdate(data) {
+      return data.updatedAt == request.time;
+    }
+
+    // Validation Blueprint for Orders (Ideally only written by Admin/Backend)
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'productType', 'productId', 'amount', 'status', 'createdAt'])
+        && data.userId == request.auth.uid
+        && data.productType is string && data.productType.size() <= 64
+        && data.productId is string && data.productId.size() <= 128
+        && data.amount is number
+        && data.status is string && data.status.size() <= 64
+        && data.createdAt == request.time;
+    }
+
+    // USERS COLLECTION
+    match /users/{userId} {
+      // Users can read their own profile. Admins can read all.
+      allow read: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      
+      // Users can create their own profile during registration.
+      allow create: if isSignedIn() 
+        && request.auth.uid == userId 
+        && isValidUser(incoming())
+        && request.auth.token.email == incoming().email;
+        
+      // Users can update their minecraftUsername.
+      allow update: if isSignedIn() && request.auth.uid == userId && isValidUserUpdate(incoming()) && (
+        // Action: Update MC Username
+        (
+          incoming().diff(existing()).affectedKeys().hasOnly(['minecraftUsername', 'updatedAt']) 
+          && incoming().minecraftUsername is string 
+          && incoming().minecraftUsername.size() <= 64
+        )
+      );
+    }
+
+    // ORDERS COLLECTION
+    match /orders/{orderId} {
+      allow read: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      // Users can initialize a pending order
+      allow create: if isSignedIn() 
+        && incoming().userId == request.auth.uid
+        && incoming().status == 'pending'
+        && isValidOrder(incoming());
+      // Only backend updates the order status upon success
+      allow update: if isAdmin();
+    }
+
+    // ADMINS COLLECTION
+    match /admins/{adminId} {
+      allow read: if isSignedIn() && request.auth.uid == adminId;
+      allow write: if false; // Only created via backend script/console
+    }
+  }
+}
